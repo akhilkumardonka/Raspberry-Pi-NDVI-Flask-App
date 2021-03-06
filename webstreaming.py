@@ -18,13 +18,16 @@ import cv2
 # exchanges of the output frames (useful for multiple browsers/tabs
 # are viewing tthe stream)
 outputFrame = None
+outputFrame_live = None
 lock = threading.Lock()
+lock_live = threading.Lock()
 
 # initialize a flask object
 app = Flask(__name__)
 
 # initialize the video stream and allow the camera sensor to
 # warmup
+# vs = VideoStream(0).start()
 vs = VideoStream(usePiCamera=1).start()
 time.sleep(2.0)
 
@@ -38,16 +41,16 @@ def compute_ndvi():
 	# grab global references to the video stream, output frame, and
 	# lock variables
 	global vs, outputFrame, lock
-	
+
 	nd = ComputeNdvi()
-	
+
 	# loop over frames from the video stream
 	while True:
 		# read the next frame from the video stream, resize it,
 		# convert the frame to grayscale, and blur it
 		frame = vs.read()
 		frame = nd.compute(frame)
-		
+
 		# grab the current timestamp and draw it on the frame
 		timestamp = datetime.datetime.now()
 		cv2.putText(frame, timestamp.strftime(
@@ -58,7 +61,28 @@ def compute_ndvi():
 		# lock
 		with lock:
 			outputFrame = frame.copy()
-		
+def compute_live():
+	# grab global references to the video stream, output frame, and
+	# lock variables
+	global vs, outputFrame_live, lock_live
+
+	# loop over frames from the video stream
+	while True:
+		# read the next frame from the video stream, resize it,
+		# convert the frame to grayscale, and blur it
+		frame = vs.read()
+
+		# grab the current timestamp and draw it on the frame
+		timestamp = datetime.datetime.now()
+		cv2.putText(frame, timestamp.strftime(
+			"%A %d %B %Y %I:%M:%S%p"), (10, frame.shape[0] - 10),
+			cv2.FONT_HERSHEY_SIMPLEX, 0.35, (255, 255, 255), 1)
+
+		# acquire the lock, set the output frame, and release the
+		# lock
+		with lock:
+			outputFrame_live = frame.copy()
+
 def generate():
 	# grab global references to the output frame and lock variables
 	global outputFrame, lock
@@ -83,6 +107,37 @@ def generate():
 		yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
 			bytearray(encodedImage) + b'\r\n')
 
+def generate_live():
+	# grab global references to the output frame and lock variables
+	global outputFrame_live, lock_live
+
+	# loop over frames from the output stream
+	while True:
+		# wait until the lock is acquired
+		with lock_live:
+			# check if the output frame is available, otherwise skip
+			# the iteration of the loop
+			if outputFrame_live is None:
+				continue
+
+			# encode the frame in JPEG format
+			(flag, encodedImage) = cv2.imencode(".jpg", outputFrame_live)
+
+			# ensure the frame was successfully encoded
+			if not flag:
+				continue
+
+		# yield the output frame in the byte format
+		yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
+			bytearray(encodedImage) + b'\r\n')
+
+@app.route("/video_feed_live")
+def video_feed_live():
+	# return the response generated along with the specific media
+	# type (mime type)
+	return Response(generate_live(),
+		mimetype = "multipart/x-mixed-replace; boundary=frame")
+
 @app.route("/video_feed")
 def video_feed():
 	# return the response generated along with the specific media
@@ -104,6 +159,9 @@ if __name__ == '__main__':
 	t = threading.Thread(target=compute_ndvi)
 	t.daemon = True
 	t.start()
+	t1 = threading.Thread(target=compute_live)
+	t1.daemon = True
+	t1.start()
 
 	# start the flask app
 	app.run(host=args["ip"], port=args["port"], debug=True,
